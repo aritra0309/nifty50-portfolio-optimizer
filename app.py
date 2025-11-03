@@ -48,14 +48,15 @@ def calculate_momentum_sentiment(df, window=20):
     Returns a sentiment pd.Series between -1 and 1 aligned with df.index
     """
     try:
-        # Price momentum (window-day return)
-        price_momentum = df['Close'].pct_change(window)
+        # Use rolling cumulative return over the window (avoids sparse pct_change(window) NaNs)
+        price_returns = df['Close'].pct_change()
+        price_momentum = price_returns.rolling(window=window).apply(lambda x: (1 + x).prod() - 1, raw=True)
 
         # Normalize momentum by recent volatility to avoid tiny absolute values
-        mom_std = price_momentum.abs().rolling(window=window).std().replace(0, 1e-10)
+        mom_std = price_momentum.abs().rolling(window=max(3, int(window/2))).std().replace(0, 1e-8)
         price_mom_norm = (price_momentum / mom_std).fillna(0)
 
-        # RSI
+        # RSI (14)
         delta = df['Close'].diff()
         gain = delta.clip(lower=0).rolling(window=14).mean()
         loss = -delta.clip(upper=0).rolling(window=14).mean()
@@ -63,24 +64,24 @@ def calculate_momentum_sentiment(df, window=20):
         rsi = 100 - (100 / (1 + rs))
         rsi_normalized = ((rsi - 50) / 50).fillna(0)
 
-        # Moving average crossover signal (1 or -1)
+        # Moving average crossover signal (short vs long)
         ma_short = df['Close'].rolling(window=10).mean()
         ma_long = df['Close'].rolling(window=30).mean()
         ma_signal = ((ma_short > ma_long).astype(int) * 2 - 1).fillna(0)
 
-        # Volume-weighted momentum (normalize similarly)
-        vol_mean = df['Volume'].rolling(window=20).mean().replace(0, 1e-10)
-        volume_ratio = (df['Volume'] / vol_mean).fillna(0)
+        # Volume-weighted momentum
+        vol_mean = df.get('Volume', pd.Series(1)).rolling(window=20).mean().replace(0, 1e-8)
+        volume_ratio = (df.get('Volume', pd.Series(1)) / vol_mean).fillna(0)
         volume_momentum = price_momentum * volume_ratio
-        volmom_std = volume_momentum.abs().rolling(window=window).std().replace(0, 1e-10)
+        volmom_std = volume_momentum.abs().rolling(window=max(3, int(window/2))).std().replace(0, 1e-8)
         volume_mom_norm = (volume_momentum / volmom_std).fillna(0)
 
-        # Combine signals with weights and non-linear squashing
+        # Combine signals and squash into [-1, 1]
         sentiment_raw = (
-            0.3 * np.tanh(price_mom_norm * 3) +
-            0.2 * rsi_normalized +
-            0.2 * ma_signal +
-            0.3 * np.tanh(volume_mom_norm * 3)
+            0.35 * np.tanh(price_mom_norm * 3) +
+            0.20 * rsi_normalized +
+            0.15 * ma_signal +
+            0.30 * np.tanh(volume_mom_norm * 3)
         )
 
         sentiment = pd.Series(np.clip(sentiment_raw, -1, 1), index=df.index).fillna(0)
@@ -239,6 +240,16 @@ def refresh_data():
         
         df = df.dropna()
         enhanced_stock_data[ticker] = df
+    
+    # Debug: quick sanity check of computed sentiment series
+    try:
+        sample_ticker = next(iter(enhanced_stock_data))
+        sample_series = enhanced_stock_data[sample_ticker]['sentiment'].dropna()
+        st.info(f"Debug: sample ticker={sample_ticker}, sentiment tail={list(sample_series.tail(5))}")
+        nonzero_counts = sum(1 for df in enhanced_stock_data.values() if df['sentiment'].abs().sum() > 0)
+        st.info(f"Debug: stocks with any non-zero sentiment = {nonzero_counts}/{len(enhanced_stock_data)}")
+    except Exception:
+        pass
     
     st.info(f"✅ Sentiment: {stocks_with_news} stocks with news, {stocks_with_momentum} with momentum-only")
     progress_bar.progress(0.45)
