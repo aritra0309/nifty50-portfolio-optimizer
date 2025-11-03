@@ -558,18 +558,22 @@ def main():
         with tab1:
             st.subheader("Portfolio Allocation")
             
-            # Create allocation dataframe
-            allocation_df = pd.DataFrame({
+            # Determine whether any selected tickers have non-zero sentiment
+            has_sentiment = any(portfolio_data[t]['mean_sentiment'] != 0 for t in result['tickers'])
+            
+            # Create allocation dataframe conditionally including Sentiment
+            alloc_dict = {
                 'Stock': result['tickers'],
                 'Weight (%)': [w * 100 for w in result['weights']],
                 'Expected Return (%)': [portfolio_data[t]['expected_return'] * 100 for t in result['tickers']],
                 'Risk (%)': [portfolio_data[t]['volatility'] * 100 for t in result['tickers']],
                 'Current Price': [portfolio_data[t]['current_price'] for t in result['tickers']],
                 'Predicted Price': [portfolio_data[t]['predicted_price'] for t in result['tickers']],
-                # Hide zeros by converting them to NaN so they render blank in tables/charts
-                'Sentiment': [portfolio_data[t]['mean_sentiment'] if portfolio_data[t]['mean_sentiment'] != 0 else np.nan
-                              for t in result['tickers']]
-            })
+            }
+            if has_sentiment:
+                alloc_dict['Sentiment'] = [portfolio_data[t]['mean_sentiment'] for t in result['tickers']]
+            
+            allocation_df = pd.DataFrame(alloc_dict)
             
             # Filter stocks with >1% allocation
             display_df = allocation_df[allocation_df['Weight (%)'] > 1.0].sort_values('Weight (%)', ascending=False)
@@ -602,19 +606,22 @@ def main():
                 fig_bar.update_layout(xaxis_tickangle=-45)
                 st.plotly_chart(fig_bar, use_container_width=True)
             
-            # Display table
-            st.dataframe(
-                display_df.style.format({
-                    'Weight (%)': '{:.2f}%',
-                    'Expected Return (%)': '{:.2f}%',
-                    'Risk (%)': '{:.2f}%',
-                    'Current Price': '₹{:.2f}',
-                    'Predicted Price': '₹{:.2f}',
-                    'Sentiment': '{:.3f}'
-                }).background_gradient(subset=['Expected Return (%)'], cmap='RdYlGn')
-                .background_gradient(subset=['Sentiment'], cmap='RdYlGn'),
-                use_container_width=True
-            )
+            # Display table with Sentiment column only if present
+            fmt = {
+                'Weight (%)': '{:.2f}%',
+                'Expected Return (%)': '{:.2f}%',
+                'Risk (%)': '{:.2f}%',
+                'Current Price': '₹{:.2f}',
+                'Predicted Price': '₹{:.2f}',
+            }
+            if has_sentiment:
+                fmt['Sentiment'] = '{:.3f}'
+            
+            styled = display_df.style.format(fmt).background_gradient(subset=['Expected Return (%)'], cmap='RdYlGn')
+            if has_sentiment:
+                styled = styled.background_gradient(subset=['Sentiment'], cmap='RdYlGn')
+            
+            st.dataframe(styled, use_container_width=True)
         
         with tab2:
             st.subheader("Individual Stock Details")
@@ -642,93 +649,114 @@ def main():
                     st.metric("Predicted Price", f"₹{stock_info['predicted_price']:.2f}")
                 with col5:
                     ms = stock_info['mean_sentiment']
-                    # Show N/A instead of 0.000
-                    if ms == 0 or np.isnan(ms):
-                        st.metric("Sentiment", "N/A")
-                    else:
+                    # Remove Sentiment metric entirely when it's zero / not available
+                    if ms != 0 and not np.isnan(ms):
                         sentiment_color = "🟢" if ms > 0 else "🔴"
                         st.metric("Sentiment", f"{sentiment_color} {ms:.3f}")
+                    # else: do nothing (no metric shown)
                 
                 # Price and sentiment charts
                 stock_data = enhanced_stock_data[selected_stock]
                 
-                # Create subplots
-                from plotly.subplots import make_subplots
-                
-                fig = make_subplots(
-                    rows=2, cols=1,
-                    shared_xaxes=True,
-                    vertical_spacing=0.1,
-                    subplot_titles=(f'{selected_stock} - Historical Price', 'Sentiment Score'),
-                    row_heights=[0.7, 0.3]
-                )
-                
-                # Price chart
-                fig.add_trace(
-                    go.Scatter(x=stock_data.index, y=stock_data['Close'], 
-                              mode='lines', name='Close Price', line=dict(color='blue')),
-                    row=1, col=1
-                )
-                
-                # Add moving averages
-                fig.add_trace(
-                    go.Scatter(x=stock_data.index, y=stock_data['MA_20'], 
-                              mode='lines', name='MA 20', line=dict(color='orange', dash='dash')),
-                    row=1, col=1
-                )
-                
-                fig.add_trace(
-                    go.Scatter(x=stock_data.index, y=stock_data['MA_50'], 
-                              mode='lines', name='MA 50', line=dict(color='red', dash='dash')),
-                    row=1, col=1
-                )
-                
-                # Sentiment chart
-                # If there's no non-zero sentiment data, skip the bar trace and show a small note
+                # If no sentiment data, show only price chart
                 if stock_data['sentiment'].abs().sum() == 0:
-                    fig.add_trace(
-                        go.Scatter(x=[stock_data.index[-1]], y=[0], text=["No sentiment data"], mode='text',
-                                   showlegend=False),
-                        row=2, col=1
-                    )
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=stock_data.index, y=stock_data['Close'],
+                                             mode='lines', name='Close Price', line=dict(color='blue')))
+                    fig.add_trace(go.Scatter(x=stock_data.index, y=stock_data['MA_20'],
+                                             mode='lines', name='MA 20', line=dict(color='orange', dash='dash')))
+                    fig.add_trace(go.Scatter(x=stock_data.index, y=stock_data['MA_50'],
+                                             mode='lines', name='MA 50', line=dict(color='red', dash='dash')))
+                    fig.update_layout(title=f'{selected_stock} - Historical Price', height=500, hovermode='x unified')
+                    fig.update_yaxes(title_text="Price (₹)")
+                    st.plotly_chart(fig, use_container_width=True)
                 else:
+                    # Create subplots with sentiment
+                    from plotly.subplots import make_subplots
+                    
+                    fig = make_subplots(
+                        rows=2, cols=1,
+                        shared_xaxes=True,
+                        vertical_spacing=0.1,
+                        subplot_titles=(f'{selected_stock} - Historical Price', 'Sentiment Score'),
+                        row_heights=[0.7, 0.3]
+                    )
+                    
+                    # Price chart
+                    fig.add_trace(
+                        go.Scatter(x=stock_data.index, y=stock_data['Close'], 
+                                  mode='lines', name='Close Price', line=dict(color='blue')),
+                        row=1, col=1
+                    )
+                    
+                    # Add moving averages
+                    fig.add_trace(
+                        go.Scatter(x=stock_data.index, y=stock_data['MA_20'], 
+                                  mode='lines', name='MA 20', line=dict(color='orange', dash='dash')),
+                        row=1, col=1
+                    )
+                    
+                    fig.add_trace(
+                        go.Scatter(x=stock_data.index, y=stock_data['MA_50'], 
+                                  mode='lines', name='MA 50', line=dict(color='red', dash='dash')),
+                        row=1, col=1
+                    )
+                    
+                    # Sentiment bar
                     colors = ['red' if x < 0 else 'green' for x in stock_data['sentiment']]
                     fig.add_trace(
                         go.Bar(x=stock_data.index, y=stock_data['sentiment'],
                                name='Sentiment', marker_color=colors, opacity=0.6),
                         row=2, col=1
                     )
-                
-                fig.update_xaxes(title_text="Date", row=2, col=1)
-                fig.update_yaxes(title_text="Price (₹)", row=1, col=1)
-                fig.update_yaxes(title_text="Sentiment", row=2, col=1)
-                
-                fig.update_layout(height=700, showlegend=True, hovermode='x unified')
-                st.plotly_chart(fig, use_container_width=True)
+                    
+                    fig.update_xaxes(title_text="Date", row=2, col=1)
+                    fig.update_yaxes(title_text="Price (₹)", row=1, col=1)
+                    fig.update_yaxes(title_text="Sentiment", row=2, col=1)
+                    
+                    fig.update_layout(height=700, showlegend=True, hovermode='x unified')
+                    st.plotly_chart(fig, use_container_width=True)
         
         with tab3:
             st.subheader("Risk Analysis")
             
-            # Risk-Return scatter
-            scatter_df = pd.DataFrame({
+            # Risk-Return scatter - include Sentiment only if any non-zero
+            has_sentiment_scatter = any(portfolio_data[t]['mean_sentiment'] != 0 for t in result['tickers'])
+            
+            scatter_dict = {
                 'Stock': result['tickers'],
                 'Expected Return (%)': [portfolio_data[t]['expected_return'] * 100 for t in result['tickers']],
                 'Risk (%)': [portfolio_data[t]['volatility'] * 100 for t in result['tickers']],
                 'Weight (%)': [w * 100 for w in result['weights']],
-                'Sentiment': [portfolio_data[t]['mean_sentiment'] for t in result['tickers']]
-            })
+            }
+            if has_sentiment_scatter:
+                scatter_dict['Sentiment'] = [portfolio_data[t]['mean_sentiment'] for t in result['tickers']]
             
-            fig_scatter = px.scatter(
-                scatter_df,
-                x='Risk (%)',
-                y='Expected Return (%)',
-                size='Weight (%)',
-                color='Sentiment',
-                hover_name='Stock',
-                title='Risk vs Return Analysis',
-                labels={'Risk (%)': 'Annual Volatility (%)', 'Expected Return (%)': 'Expected Return (%)'},
-                color_continuous_scale='RdYlGn'
-            )
+            scatter_df = pd.DataFrame(scatter_dict)
+            
+            if has_sentiment_scatter:
+                fig_scatter = px.scatter(
+                    scatter_df,
+                    x='Risk (%)',
+                    y='Expected Return (%)',
+                    size='Weight (%)',
+                    color='Sentiment',
+                    hover_name='Stock',
+                    title='Risk vs Return Analysis',
+                    labels={'Risk (%)': 'Annual Volatility (%)', 'Expected Return (%)': 'Expected Return (%)'},
+                    color_continuous_scale='RdYlGn'
+                )
+            else:
+                fig_scatter = px.scatter(
+                    scatter_df,
+                    x='Risk (%)',
+                    y='Expected Return (%)',
+                    size='Weight (%)',
+                    hover_name='Stock',
+                    title='Risk vs Return Analysis',
+                    labels={'Risk (%)': 'Annual Volatility (%)', 'Expected Return (%)': 'Expected Return (%)'}
+                )
+            
             fig_scatter.add_hline(
                 y=result['expected_return'] * 100,
                 line_dash="dash",
@@ -769,8 +797,11 @@ def main():
             if investment_amount:
                 st.markdown("### 📋 Investment Breakdown")
                 
+                # Determine if any sentiment exists for selected tickers
+                has_sentiment_invest = any(portfolio_data[t]['mean_sentiment'] != 0 for t in result['tickers'])
+                
                 # Calculate investment per stock
-                investment_df = pd.DataFrame({
+                invest_dict = {
                     'Stock': result['tickers'],
                     'Weight (%)': [w * 100 for w in result['weights']],
                     'Investment (₹)': [w * investment_amount for w in result['weights']],
@@ -780,25 +811,30 @@ def main():
                     'Actual Investment (₹)': [int((w * investment_amount) / portfolio_data[t]['current_price']) * 
                                              portfolio_data[t]['current_price'] 
                                              for w, t in zip(result['weights'], result['tickers'])],
-                    # Hide zero sentiment in investment table too
-                    'Sentiment': [portfolio_data[t]['mean_sentiment'] if portfolio_data[t]['mean_sentiment'] != 0 else np.nan
-                                  for t in result['tickers']]
-                })
+                }
+                if has_sentiment_invest:
+                    invest_dict['Sentiment'] = [portfolio_data[t]['mean_sentiment'] for t in result['tickers']]
+                
+                investment_df = pd.DataFrame(invest_dict)
                 
                 # Filter and sort
                 investment_df = investment_df[investment_df['Weight (%)'] > 1.0].sort_values('Investment (₹)', ascending=False)
                 
-                st.dataframe(
-                    investment_df.style.format({
-                        'Weight (%)': '{:.2f}%',
-                        'Investment (₹)': '₹{:,.2f}',
-                        'Current Price (₹)': '₹{:.2f}',
-                        'Shares to Buy': '{:.0f}',
-                        'Actual Investment (₹)': '₹{:,.2f}',
-                        'Sentiment': '{:.3f}'
-                    }).background_gradient(subset=['Sentiment'], cmap='RdYlGn'),
-                    use_container_width=True
-                )
+                # Styling
+                fmt_inv = {
+                    'Weight (%)': '{:.2f}%',
+                    'Investment (₹)': '₹{:,.2f}',
+                    'Current Price (₹)': '₹{:.2f}',
+                    'Shares to Buy': '{:.0f}',
+                    'Actual Investment (₹)': '₹{:,.2f}',
+                }
+                if has_sentiment_invest:
+                    fmt_inv['Sentiment'] = '{:.3f}'
+                    styled_invest = investment_df.style.format(fmt_inv).background_gradient(subset=['Sentiment'], cmap='RdYlGn')
+                else:
+                    styled_invest = investment_df.style.format(fmt_inv)
+                
+                st.dataframe(styled_invest, use_container_width=True)
                 
                 # Summary
                 total_actual = investment_df['Actual Investment (₹)'].sum()
@@ -829,29 +865,27 @@ def main():
         # Show welcome screen
         st.info("👈 Use the sidebar to set your portfolio preferences and click 'Optimize Portfolio' to get started!")
         
-        # Show sentiment distribution
+        # Show sentiment distribution only if any non-zero sentiments exist
         if portfolio_data:
-            st.subheader("📊 Sentiment Distribution")
-            
             sentiment_values = [portfolio_data[t]['mean_sentiment'] for t in portfolio_data.keys()]
             nonzero_sentiments = [s for s in sentiment_values if s != 0]
             
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                positive = sum(1 for s in nonzero_sentiments if s > 0.1)
-                st.metric("Positive Sentiment", f"{positive} stocks",
-                         delta=f"{(positive / max(1, len(nonzero_sentiments))) * 100:.1f}%")
-            with col2:
-                neutral = sum(1 for s in nonzero_sentiments if -0.1 <= s <= 0.1)
-                st.metric("Neutral Sentiment", f"{neutral} stocks",
-                         delta=f"{(neutral / max(1, len(nonzero_sentiments))) * 100:.1f}%")
-            with col3:
-                negative = sum(1 for s in nonzero_sentiments if s < -0.1)
-                st.metric("Negative Sentiment", f"{negative} stocks",
-                         delta=f"{(negative / max(1, len(nonzero_sentiments))) * 100:.1f}%")
-            
-            # Sentiment histogram: show only if there is non-zero sentiment
             if nonzero_sentiments:
+                st.subheader("📊 Sentiment Distribution")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    positive = sum(1 for s in nonzero_sentiments if s > 0.1)
+                    st.metric("Positive Sentiment", f"{positive} stocks",
+                             delta=f"{(positive / max(1, len(nonzero_sentiments))) * 100:.1f}%")
+                with col2:
+                    neutral = sum(1 for s in nonzero_sentiments if -0.1 <= s <= 0.1)
+                    st.metric("Neutral Sentiment", f"{neutral} stocks",
+                             delta=f"{(neutral / max(1, len(nonzero_sentiments))) * 100:.1f}%")
+                with col3:
+                    negative = sum(1 for s in nonzero_sentiments if s < -0.1)
+                    st.metric("Negative Sentiment", f"{negative} stocks",
+                             delta=f"{(negative / max(1, len(nonzero_sentiments))) * 100:.1f}%")
+                
                 fig_hist = go.Figure()
                 fig_hist.add_trace(go.Histogram(
                     x=nonzero_sentiments,
@@ -866,39 +900,45 @@ def main():
                     showlegend=False
                 )
                 st.plotly_chart(fig_hist, use_container_width=True)
-            else:
-                st.info("No sentiment data available to display.")
+            # else: do not render any sentiment widgets at all
         
         st.markdown("---")
         
         # Show available stocks
         st.subheader("📋 Available Stocks")
         
-        stocks_df = pd.DataFrame({
+        # Determine whether to include Sentiment column in the market table
+        has_market_sentiment = any(portfolio_data[t]['mean_sentiment'] != 0 for t in portfolio_data.keys())
+        
+        stocks_dict = {
             'Stock': list(portfolio_data.keys()),
             'Current Price': [portfolio_data[t]['current_price'] for t in portfolio_data.keys()],
             'Expected Return (%)': [portfolio_data[t]['expected_return'] * 100 for t in portfolio_data.keys()],
             'Risk (%)': [portfolio_data[t]['volatility'] * 100 for t in portfolio_data.keys()],
-            # Hide zeros
-            'Sentiment': [portfolio_data[t]['mean_sentiment'] if portfolio_data[t]['mean_sentiment'] != 0 else np.nan
-                          for t in portfolio_data.keys()],
             'Predicted Price': [portfolio_data[t]['predicted_price'] for t in portfolio_data.keys()]
-        }).sort_values('Expected Return (%)', ascending=False)
+        }
+        if has_market_sentiment:
+            stocks_dict['Sentiment'] = [portfolio_data[t]['mean_sentiment'] for t in portfolio_data.keys()]
+        
+        stocks_df = pd.DataFrame(stocks_dict).sort_values('Expected Return (%)', ascending=False)
         
         # Add Sharpe Ratio calculation
         stocks_df['Sharpe Ratio'] = (stocks_df['Expected Return (%)'] - risk_free_rate * 100) / stocks_df['Risk (%)']
         
         # Build styler and apply sentiment gradient only when sentiment exists
-        styled = stocks_df.style.format({
+        fmt_stocks = {
             'Current Price': '₹{:.2f}',
             'Expected Return (%)': '{:.2f}%',
-            'Risk (%)': '{:.2f}%',
-            'Sentiment': '{:.3f}',
+            'Risk (%)': '{:.2f}',
             'Predicted Price': '₹{:.2f}',
             'Sharpe Ratio': '{:.2f}'
-        }).background_gradient(subset=['Expected Return (%)'], cmap='RdYlGn')
+        }
+        if has_market_sentiment:
+            fmt_stocks['Sentiment'] = '{:.3f}'
         
-        if stocks_df['Sentiment'].notna().any():
+        styled = stocks_df.style.format(fmt_stocks).background_gradient(subset=['Expected Return (%)'], cmap='RdYlGn')
+        
+        if has_market_sentiment:
             styled = styled.background_gradient(subset=['Sentiment'], cmap='RdYlGn')
         
         styled = styled.background_gradient(subset=['Sharpe Ratio'], cmap='RdYlGn')
@@ -924,9 +964,12 @@ def main():
             st.metric("Average Risk", f"{avg_risk:.2f}%")
         
         with col3:
-            avg_sentiment = stocks_df['Sentiment'].mean()
-            sentiment_emoji = "🟢" if avg_sentiment > 0 else "🔴" if avg_sentiment < 0 else "⚪"
-            st.metric("Average Sentiment", f"{sentiment_emoji} {avg_sentiment:.3f}")
+            # Only show Average Sentiment if market has any non-zero sentiment
+            if has_market_sentiment:
+                avg_sentiment = stocks_df['Sentiment'].mean()
+                sentiment_emoji = "🟢" if avg_sentiment > 0 else "🔴" if avg_sentiment < 0 else "⚪"
+                st.metric("Average Sentiment", f"{sentiment_emoji} {avg_sentiment:.3f}")
+            # else: skip showing the Average Sentiment metric entirely
         
         with col4:
             avg_sharpe = stocks_df['Sharpe Ratio'].mean()
