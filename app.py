@@ -41,6 +41,49 @@ def load_data():
         data = pickle.load(f)
     return data
 
+# Momentum-based sentiment calculation
+def calculate_momentum_sentiment(df, window=20):
+    """
+    Calculate sentiment proxy based on price momentum and technical indicators
+    Returns a sentiment score between -1 and 1
+    """
+    try:
+        # 1. Price momentum (20-day return)
+        price_momentum = df['Close'].pct_change(window).fillna(0)
+        
+        # 2. Relative Strength Index (RSI)
+        delta = df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / (loss + 1e-10)  # Avoid division by zero
+        rsi = 100 - (100 / (1 + rs))
+        rsi_normalized = (rsi - 50) / 50  # Convert to -1 to 1
+        
+        # 3. Moving Average Crossover Signal
+        ma_short = df['Close'].rolling(window=10).mean()
+        ma_long = df['Close'].rolling(window=30).mean()
+        ma_signal = np.where(ma_short > ma_long, 1, -1)
+        
+        # 4. Volume-weighted momentum
+        volume_ratio = df['Volume'] / (df['Volume'].rolling(window=20).mean() + 1e-10)
+        volume_momentum = price_momentum * volume_ratio
+        
+        # Combine signals with weights
+        sentiment = (
+            0.3 * np.tanh(price_momentum * 10) +  # Normalize momentum
+            0.2 * rsi_normalized +
+            0.2 * ma_signal +
+            0.3 * np.tanh(volume_momentum * 5)
+        )
+        
+        # Clip to [-1, 1] range
+        sentiment = np.clip(sentiment, -1, 1)
+        
+        return sentiment
+    except Exception as e:
+        print(f"Error calculating momentum sentiment: {e}")
+        return pd.Series(0.0, index=df.index)
+
 # Function to refresh data
 def refresh_data():
     """Fetch latest stock data and re-run predictions"""
@@ -57,7 +100,7 @@ def refresh_data():
     # Disable GPU for TensorFlow
     os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
     
-    st.info("🔄 Step 1/6: Fetching latest stock data...")
+    st.info("🔄 Step 1/7: Fetching latest stock data...")
     progress_bar = st.progress(0)
     
     # Load existing data to get tickers
@@ -78,12 +121,13 @@ def refresh_data():
                 stock_data[ticker] = data
         except:
             pass
-        progress_bar.progress((i + 1) / len(nifty50_tickers) * 0.15)
+        progress_bar.progress((i + 1) / len(nifty50_tickers) * 0.12)
     
-    st.info(f"📰 Step 2/6: Fetching news and analyzing sentiment... ({len(stock_data)} stocks)")
-    progress_bar.progress(0.15)
+    st.info(f"🤖 Step 2/7: Loading FinBERT model... ({len(stock_data)} stocks)")
+    progress_bar.progress(0.12)
     
     # Load FinBERT
+    finbert_loaded = False
     try:
         from huggingface_hub import snapshot_download
         model_path = snapshot_download(repo_id="yiyanghkust/finbert-tone")
@@ -92,75 +136,109 @@ def refresh_data():
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         finbert_model.to(device)
         finbert_model.eval()
-    except:
-        st.error("❌ Failed to load FinBERT model")
-        return
+        finbert_loaded = True
+        st.info(f"✅ FinBERT loaded successfully on {device}")
+    except Exception as e:
+        st.warning(f"⚠️ FinBERT not available: {str(e)[:100]}... Using momentum-based sentiment instead.")
+        finbert_loaded = False
+    
+    progress_bar.progress(0.20)
+    
+    # Sentiment analysis function
+    def get_sentiment_score(text):
+        if not finbert_loaded or not text or len(text.strip()) == 0:
+            return 0.0
+        try:
+            inputs = finbert_tokenizer(text, return_tensors="pt", truncation=True, max_length=512, padding=True)
+            inputs = {key: val.to(device) for key, val in inputs.items()}
+            with torch.no_grad():
+                outputs = finbert_model(**inputs)
+                predictions = torch.nn.functional.softmax(outputs.logits, dim=-1)
+            neutral = predictions[0][0].item()
+            positive = predictions[0][1].item()
+            negative = predictions[0][2].item()
+            return positive - negative
+        except:
+            return 0.0
     
     # Fetch news and calculate sentiment
-    def get_sentiment_score(text):
-        if not text or len(text.strip()) == 0:
-            return 0.0
-        inputs = finbert_tokenizer(text, return_tensors="pt", truncation=True, max_length=512, padding=True)
-        inputs = {key: val.to(device) for key, val in inputs.items()}
-        with torch.no_grad():
-            outputs = finbert_model(**inputs)
-            predictions = torch.nn.functional.softmax(outputs.logits, dim=-1)
-        neutral = predictions[0][0].item()
-        positive = predictions[0][1].item()
-        negative = predictions[0][2].item()
-        return positive - negative
-    
+    st.info("📰 Step 3/7: Fetching news and analyzing sentiment...")
     daily_sentiment = {}
-    for ticker in stock_data.keys():
-        try:
-            stock = yf.Ticker(ticker)
-            news = stock.news
-            if news:
-                sentiment_scores = []
-                dates = []
-                for article in news:
-                    title = article.get('title', '')
-                    summary = article.get('summary', '')
-                    text = f"{title}. {summary}"
-                    score = get_sentiment_score(text)
-                    sentiment_scores.append(score)
-                    pub_date = datetime.fromtimestamp(article.get('providerPublishTime', 0))
-                    dates.append(pub_date.date())
-                
-                if sentiment_scores:
-                    sentiment_df = pd.DataFrame({'date': dates, 'sentiment': sentiment_scores})
-                    sentiment_df['date'] = pd.to_datetime(sentiment_df['date'])
-                    daily_avg = sentiment_df.groupby('date')['sentiment'].mean()
-                    daily_sentiment[ticker] = daily_avg
-        except:
-            pass
+    news_count = 0
     
-    progress_bar.progress(0.30)
-    st.info("🔗 Step 3/6: Merging sentiment with stock data...")
+    if finbert_loaded:
+        for i, ticker in enumerate(stock_data.keys()):
+            try:
+                stock = yf.Ticker(ticker)
+                news = stock.news
+                if news and len(news) > 0:
+                    sentiment_scores = []
+                    dates = []
+                    for article in news[:20]:  # Limit to 20 articles
+                        title = article.get('title', '')
+                        summary = article.get('summary', '')
+                        text = f"{title}. {summary}"
+                        score = get_sentiment_score(text)
+                        sentiment_scores.append(score)
+                        pub_date = datetime.fromtimestamp(article.get('providerPublishTime', 0))
+                        dates.append(pub_date.date())
+                    
+                    if sentiment_scores:
+                        sentiment_df = pd.DataFrame({'date': dates, 'sentiment': sentiment_scores})
+                        sentiment_df['date'] = pd.to_datetime(sentiment_df['date'])
+                        daily_avg = sentiment_df.groupby('date')['sentiment'].mean()
+                        daily_sentiment[ticker] = daily_avg
+                        news_count += len(sentiment_scores)
+            except:
+                pass
+            
+            if i % 10 == 0:  # Update every 10 stocks
+                progress_bar.progress(0.20 + (i + 1) / len(stock_data) * 0.15)
+    
+    st.info(f"📊 Found news for {len(daily_sentiment)} stocks ({news_count} total articles)")
+    progress_bar.progress(0.35)
+    
+    st.info("🔗 Step 4/7: Merging sentiment with stock data...")
     
     # Merge sentiment with stock data
     enhanced_stock_data = {}
+    stocks_with_news = 0
+    stocks_with_momentum = 0
+    
     for ticker in stock_data.keys():
         df = stock_data[ticker].copy()
         df.index = pd.to_datetime(df.index)
         
-        if ticker in daily_sentiment:
-            sentiment_series = daily_sentiment[ticker]
-            df['sentiment'] = sentiment_series
-            df['sentiment'] = df['sentiment'].fillna(method='ffill').fillna(0)
-        else:
-            df['sentiment'] = 0.0
-        
+        # Calculate technical indicators
         df['returns'] = df['Close'].pct_change()
         df['volatility'] = df['returns'].rolling(window=20).std()
         df['MA_20'] = df['Close'].rolling(window=20).mean()
         df['MA_50'] = df['Close'].rolling(window=50).mean()
-        df = df.dropna()
         
+        # Calculate momentum-based sentiment first (fallback)
+        momentum_sentiment = calculate_momentum_sentiment(df)
+        
+        # Try to use news sentiment if available
+        if ticker in daily_sentiment:
+            sentiment_series = daily_sentiment[ticker]
+            df['news_sentiment'] = sentiment_series
+            df['news_sentiment'] = df['news_sentiment'].fillna(method='ffill').fillna(0)
+            
+            # Hybrid: 70% news + 30% momentum (if news exists)
+            df['sentiment'] = 0.7 * df['news_sentiment'] + 0.3 * momentum_sentiment
+            stocks_with_news += 1
+        else:
+            # Use only momentum-based sentiment
+            df['sentiment'] = momentum_sentiment
+            stocks_with_momentum += 1
+        
+        df = df.dropna()
         enhanced_stock_data[ticker] = df
     
+    st.info(f"✅ Sentiment: {stocks_with_news} stocks with news, {stocks_with_momentum} with momentum-only")
     progress_bar.progress(0.45)
-    st.info("🤖 Step 4/6: Training LSTM models... (This will take a while)")
+    
+    st.info("🤖 Step 5/7: Training LSTM models... (This will take a while)")
     
     # Prepare and train LSTM
     def prepare_lstm_data(df, lookback=60):
@@ -182,6 +260,9 @@ def refresh_data():
     for i, ticker in enumerate(enhanced_stock_data.keys()):
         try:
             df = enhanced_stock_data[ticker]
+            if len(df) < lookback + 100:  # Need enough data
+                continue
+                
             X, y, scaler = prepare_lstm_data(df, lookback=lookback)
             scalers[ticker] = scaler
             
@@ -203,11 +284,12 @@ def refresh_data():
             
             lstm_models[ticker] = model
             progress_bar.progress(0.45 + (i + 1) / len(enhanced_stock_data) * 0.35)
-        except:
+        except Exception as e:
+            print(f"Error training LSTM for {ticker}: {e}")
             pass
     
     progress_bar.progress(0.80)
-    st.info("📊 Step 5/6: Generating predictions...")
+    st.info(f"📊 Step 6/7: Generating predictions... ({len(lstm_models)} models trained)")
     
     # Generate predictions
     future_predictions = {}
@@ -240,11 +322,12 @@ def refresh_data():
             future_prices = denormalized[:, 3]
             
             future_predictions[ticker] = future_prices
-        except:
+        except Exception as e:
+            print(f"Error predicting for {ticker}: {e}")
             pass
     
     progress_bar.progress(0.90)
-    st.info("💼 Step 6/6: Calculating portfolio metrics...")
+    st.info("💼 Step 7/7: Calculating portfolio metrics...")
     
     # Calculate portfolio data
     portfolio_data = {}
@@ -255,15 +338,17 @@ def refresh_data():
             expected_return = float((predicted_prices[-1] - current_price) / current_price)
             historical_returns = enhanced_stock_data[ticker]['returns'].values
             volatility = float(np.std(historical_returns) * np.sqrt(252))
+            mean_sentiment = float(enhanced_stock_data[ticker]['sentiment'].mean())
             
             portfolio_data[ticker] = {
                 'current_price': current_price,
                 'predicted_price': float(predicted_prices[-1]),
                 'expected_return': expected_return,
                 'volatility': volatility,
-                'mean_sentiment': float(enhanced_stock_data[ticker]['sentiment'].mean())
+                'mean_sentiment': mean_sentiment
             }
-        except:
+        except Exception as e:
+            print(f"Error calculating metrics for {ticker}: {e}")
             pass
     
     # Save updated data
@@ -275,14 +360,19 @@ def refresh_data():
         'future_predictions': future_predictions,
         'nifty50_tickers': nifty50_tickers,
         'start_date': start_date,
-        'end_date': end_date
+        'end_date': end_date,
+        'sentiment_stats': {
+            'stocks_with_news': stocks_with_news,
+            'stocks_with_momentum': stocks_with_momentum,
+            'total_news_articles': news_count
+        }
     }
     
     with open('portfolio_model_data.pkl', 'wb') as f:
         pickle.dump(streamlit_data, f)
     
     progress_bar.progress(1.0)
-    st.success("✅ Data refreshed successfully!")
+    st.success(f"✅ Data refreshed successfully! {len(portfolio_data)} stocks ready for optimization.")
     st.balloons()
     
     # Clear cache and rerun
@@ -301,6 +391,9 @@ def main():
         enhanced_stock_data = data['enhanced_stock_data']
         start_date = data['start_date']
         end_date = data['end_date']
+        
+        # Get sentiment stats if available
+        sentiment_stats = data.get('sentiment_stats', {})
     except FileNotFoundError:
         st.error("❌ Data file not found! Please run the Jupyter notebook first to generate 'portfolio_model_data.pkl'")
         return
@@ -315,6 +408,12 @@ def main():
     
     st.sidebar.markdown(f"**Data Period:** {start_date.date()} to {end_date.date()}")
     st.sidebar.markdown(f"**Available Stocks:** {len(portfolio_data)}")
+    
+    # Show sentiment stats if available
+    if sentiment_stats:
+        st.sidebar.markdown(f"**News-based:** {sentiment_stats.get('stocks_with_news', 0)}")
+        st.sidebar.markdown(f"**Momentum-based:** {sentiment_stats.get('stocks_with_momentum', 0)}")
+    
     st.sidebar.markdown("---")
     
     # Portfolio constraints
@@ -494,7 +593,8 @@ def main():
                     'Current Price': '₹{:.2f}',
                     'Predicted Price': '₹{:.2f}',
                     'Sentiment': '{:.3f}'
-                }).background_gradient(subset=['Expected Return (%)'], cmap='RdYlGn'),
+                }).background_gradient(subset=['Expected Return (%)'], cmap='RdYlGn')
+                .background_gradient(subset=['Sentiment'], cmap='RdYlGn'),
                 use_container_width=True
             )
         
@@ -512,7 +612,7 @@ def main():
                 stock_weight = result['weights'][result['tickers'].index(selected_stock)] * 100
                 
                 # Display metrics
-                col1, col2, col3, col4 = st.columns(4)
+                col1, col2, col3, col4, col5 = st.columns(5)
                 
                 with col1:
                     st.metric("Portfolio Weight", f"{stock_weight:.2f}%")
@@ -522,24 +622,58 @@ def main():
                     st.metric("Current Price", f"₹{stock_info['current_price']:.2f}")
                 with col4:
                     st.metric("Predicted Price", f"₹{stock_info['predicted_price']:.2f}")
+                with col5:
+                    sentiment_color = "🟢" if stock_info['mean_sentiment'] > 0 else "🔴" if stock_info['mean_sentiment'] < 0 else "⚪"
+                    st.metric("Sentiment", f"{sentiment_color} {stock_info['mean_sentiment']:.3f}")
+                
+                # Price and sentiment charts
+                stock_data = enhanced_stock_data[selected_stock]
+                
+                # Create subplots
+                from plotly.subplots import make_subplots
+                
+                fig = make_subplots(
+                    rows=2, cols=1,
+                    shared_xaxes=True,
+                    vertical_spacing=0.1,
+                    subplot_titles=(f'{selected_stock} - Historical Price', 'Sentiment Score'),
+                    row_heights=[0.7, 0.3]
+                )
                 
                 # Price chart
-                stock_data = enhanced_stock_data[selected_stock]
-                fig_stock = go.Figure()
-                fig_stock.add_trace(go.Scatter(
-                    x=stock_data.index,
-                    y=stock_data['Close'],
-                    mode='lines',
-                    name='Historical Price',
-                    line=dict(color='blue')
-                ))
-                fig_stock.update_layout(
-                    title=f"{selected_stock} - Historical Price",
-                    xaxis_title="Date",
-                    yaxis_title="Price (₹)",
-                    hovermode='x unified'
+                fig.add_trace(
+                    go.Scatter(x=stock_data.index, y=stock_data['Close'], 
+                              mode='lines', name='Close Price', line=dict(color='blue')),
+                    row=1, col=1
                 )
-                st.plotly_chart(fig_stock, use_container_width=True)
+                
+                # Add moving averages
+                fig.add_trace(
+                    go.Scatter(x=stock_data.index, y=stock_data['MA_20'], 
+                              mode='lines', name='MA 20', line=dict(color='orange', dash='dash')),
+                    row=1, col=1
+                )
+                
+                fig.add_trace(
+                    go.Scatter(x=stock_data.index, y=stock_data['MA_50'], 
+                              mode='lines', name='MA 50', line=dict(color='red', dash='dash')),
+                    row=1, col=1
+                )
+                
+                # Sentiment chart
+                colors = ['red' if x < 0 else 'green' for x in stock_data['sentiment']]
+                fig.add_trace(
+                    go.Bar(x=stock_data.index, y=stock_data['sentiment'], 
+                          name='Sentiment', marker_color=colors, opacity=0.6),
+                    row=2, col=1
+                )
+                
+                fig.update_xaxes(title_text="Date", row=2, col=1)
+                fig.update_yaxes(title_text="Price (₹)", row=1, col=1)
+                fig.update_yaxes(title_text="Sentiment", row=2, col=1)
+                
+                fig.update_layout(height=700, showlegend=True, hovermode='x unified')
+                st.plotly_chart(fig, use_container_width=True)
         
         with tab3:
             st.subheader("Risk Analysis")
@@ -549,7 +683,8 @@ def main():
                 'Stock': result['tickers'],
                 'Expected Return (%)': [portfolio_data[t]['expected_return'] * 100 for t in result['tickers']],
                 'Risk (%)': [portfolio_data[t]['volatility'] * 100 for t in result['tickers']],
-                'Weight (%)': [w * 100 for w in result['weights']]
+                'Weight (%)': [w * 100 for w in result['weights']],
+                'Sentiment': [portfolio_data[t]['mean_sentiment'] for t in result['tickers']]
             })
             
             fig_scatter = px.scatter(
@@ -557,9 +692,11 @@ def main():
                 x='Risk (%)',
                 y='Expected Return (%)',
                 size='Weight (%)',
+                color='Sentiment',
                 hover_name='Stock',
                 title='Risk vs Return Analysis',
-                labels={'Risk (%)': 'Annual Volatility (%)', 'Expected Return (%)': 'Expected Return (%)'}
+                labels={'Risk (%)': 'Annual Volatility (%)', 'Expected Return (%)': 'Expected Return (%)'},
+                color_continuous_scale='RdYlGn'
             )
             fig_scatter.add_hline(
                 y=result['expected_return'] * 100,
@@ -611,7 +748,8 @@ def main():
                                      for w, t in zip(result['weights'], result['tickers'])],
                     'Actual Investment (₹)': [int((w * investment_amount) / portfolio_data[t]['current_price']) * 
                                              portfolio_data[t]['current_price'] 
-                                             for w, t in zip(result['weights'], result['tickers'])]
+                                             for w, t in zip(result['weights'], result['tickers'])],
+                    'Sentiment': [portfolio_data[t]['mean_sentiment'] for t in result['tickers']]
                 })
                 
                 # Filter and sort
@@ -623,8 +761,9 @@ def main():
                         'Investment (₹)': '₹{:,.2f}',
                         'Current Price (₹)': '₹{:.2f}',
                         'Shares to Buy': '{:.0f}',
-                        'Actual Investment (₹)': '₹{:,.2f}'
-                    }),
+                        'Actual Investment (₹)': '₹{:,.2f}',
+                        'Sentiment': '{:.3f}'
+                    }).background_gradient(subset=['Sentiment'], cmap='RdYlGn'),
                     use_container_width=True
                 )
                 
@@ -642,10 +781,58 @@ def main():
                 with col3:
                     st.metric("Expected Profit", f"₹{expected_profit:,.2f}", 
                              delta=f"{result['expected_return']:.2%}")
+                
+                # Download button for investment plan
+                st.markdown("---")
+                csv = investment_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download Investment Plan (CSV)",
+                    data=csv,
+                    file_name=f"portfolio_investment_plan_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv"
+                )
     
     else:
         # Show welcome screen
         st.info("👈 Use the sidebar to set your portfolio preferences and click 'Optimize Portfolio' to get started!")
+        
+        # Show sentiment distribution
+        if portfolio_data:
+            st.subheader("📊 Sentiment Distribution")
+            
+            sentiment_values = [portfolio_data[t]['mean_sentiment'] for t in portfolio_data.keys()]
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                positive = sum(1 for s in sentiment_values if s > 0.1)
+                st.metric("Positive Sentiment", f"{positive} stocks", 
+                         delta=f"{positive/len(sentiment_values)*100:.1f}%")
+            with col2:
+                neutral = sum(1 for s in sentiment_values if -0.1 <= s <= 0.1)
+                st.metric("Neutral Sentiment", f"{neutral} stocks",
+                         delta=f"{neutral/len(sentiment_values)*100:.1f}%")
+            with col3:
+                negative = sum(1 for s in sentiment_values if s < -0.1)
+                st.metric("Negative Sentiment", f"{negative} stocks",
+                         delta=f"{negative/len(sentiment_values)*100:.1f}%")
+            
+            # Sentiment histogram
+            fig_hist = go.Figure()
+            fig_hist.add_trace(go.Histogram(
+                x=sentiment_values,
+                nbinsx=30,
+                marker_color='lightblue',
+                name='Sentiment Distribution'
+            ))
+            fig_hist.update_layout(
+                title='Market Sentiment Distribution',
+                xaxis_title='Sentiment Score',
+                yaxis_title='Number of Stocks',
+                showlegend=False
+            )
+            st.plotly_chart(fig_hist, use_container_width=True)
+        
+        st.markdown("---")
         
         # Show available stocks
         st.subheader("📋 Available Stocks")
@@ -655,19 +842,50 @@ def main():
             'Current Price': [portfolio_data[t]['current_price'] for t in portfolio_data.keys()],
             'Expected Return (%)': [portfolio_data[t]['expected_return'] * 100 for t in portfolio_data.keys()],
             'Risk (%)': [portfolio_data[t]['volatility'] * 100 for t in portfolio_data.keys()],
-            'Sentiment': [portfolio_data[t]['mean_sentiment'] for t in portfolio_data.keys()]
+            'Sentiment': [portfolio_data[t]['mean_sentiment'] for t in portfolio_data.keys()],
+            'Predicted Price': [portfolio_data[t]['predicted_price'] for t in portfolio_data.keys()]
         }).sort_values('Expected Return (%)', ascending=False)
+        
+        # Add Sharpe Ratio calculation
+        stocks_df['Sharpe Ratio'] = (stocks_df['Expected Return (%)'] - risk_free_rate * 100) / stocks_df['Risk (%)']
         
         st.dataframe(
             stocks_df.style.format({
                 'Current Price': '₹{:.2f}',
                 'Expected Return (%)': '{:.2f}%',
                 'Risk (%)': '{:.2f}%',
-                'Sentiment': '{:.3f}'
-            }).background_gradient(subset=['Expected Return (%)'], cmap='RdYlGn'),
+                'Sentiment': '{:.3f}',
+                'Predicted Price': '₹{:.2f}',
+                'Sharpe Ratio': '{:.2f}'
+            }).background_gradient(subset=['Expected Return (%)'], cmap='RdYlGn')
+            .background_gradient(subset=['Sentiment'], cmap='RdYlGn')
+            .background_gradient(subset=['Sharpe Ratio'], cmap='RdYlGn'),
             use_container_width=True,
             height=400
         )
+        
+        # Add market overview
+        st.markdown("---")
+        st.subheader("📈 Market Overview")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            avg_return = stocks_df['Expected Return (%)'].mean()
+            st.metric("Average Expected Return", f"{avg_return:.2f}%")
+        
+        with col2:
+            avg_risk = stocks_df['Risk (%)'].mean()
+            st.metric("Average Risk", f"{avg_risk:.2f}%")
+        
+        with col3:
+            avg_sentiment = stocks_df['Sentiment'].mean()
+            sentiment_emoji = "🟢" if avg_sentiment > 0 else "🔴" if avg_sentiment < 0 else "⚪"
+            st.metric("Average Sentiment", f"{sentiment_emoji} {avg_sentiment:.3f}")
+        
+        with col4:
+            avg_sharpe = stocks_df['Sharpe Ratio'].mean()
+            st.metric("Average Sharpe Ratio", f"{avg_sharpe:.2f}")
 
 if __name__ == "__main__":
     main()
