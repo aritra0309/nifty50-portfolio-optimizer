@@ -566,7 +566,9 @@ def main():
                 'Risk (%)': [portfolio_data[t]['volatility'] * 100 for t in result['tickers']],
                 'Current Price': [portfolio_data[t]['current_price'] for t in result['tickers']],
                 'Predicted Price': [portfolio_data[t]['predicted_price'] for t in result['tickers']],
-                'Sentiment': [portfolio_data[t]['mean_sentiment'] for t in result['tickers']]
+                # Hide zeros by converting them to NaN so they render blank in tables/charts
+                'Sentiment': [portfolio_data[t]['mean_sentiment'] if portfolio_data[t]['mean_sentiment'] != 0 else np.nan
+                              for t in result['tickers']]
             })
             
             # Filter stocks with >1% allocation
@@ -639,8 +641,13 @@ def main():
                 with col4:
                     st.metric("Predicted Price", f"₹{stock_info['predicted_price']:.2f}")
                 with col5:
-                    sentiment_color = "🟢" if stock_info['mean_sentiment'] > 0 else "🔴" if stock_info['mean_sentiment'] < 0 else "⚪"
-                    st.metric("Sentiment", f"{sentiment_color} {stock_info['mean_sentiment']:.3f}")
+                    ms = stock_info['mean_sentiment']
+                    # Show N/A instead of 0.000
+                    if ms == 0 or np.isnan(ms):
+                        st.metric("Sentiment", "N/A")
+                    else:
+                        sentiment_color = "🟢" if ms > 0 else "🔴"
+                        st.metric("Sentiment", f"{sentiment_color} {ms:.3f}")
                 
                 # Price and sentiment charts
                 stock_data = enhanced_stock_data[selected_stock]
@@ -677,12 +684,20 @@ def main():
                 )
                 
                 # Sentiment chart
-                colors = ['red' if x < 0 else 'green' for x in stock_data['sentiment']]
-                fig.add_trace(
-                    go.Bar(x=stock_data.index, y=stock_data['sentiment'], 
-                          name='Sentiment', marker_color=colors, opacity=0.6),
-                    row=2, col=1
-                )
+                # If there's no non-zero sentiment data, skip the bar trace and show a small note
+                if stock_data['sentiment'].abs().sum() == 0:
+                    fig.add_trace(
+                        go.Scatter(x=[stock_data.index[-1]], y=[0], text=["No sentiment data"], mode='text',
+                                   showlegend=False),
+                        row=2, col=1
+                    )
+                else:
+                    colors = ['red' if x < 0 else 'green' for x in stock_data['sentiment']]
+                    fig.add_trace(
+                        go.Bar(x=stock_data.index, y=stock_data['sentiment'],
+                               name='Sentiment', marker_color=colors, opacity=0.6),
+                        row=2, col=1
+                    )
                 
                 fig.update_xaxes(title_text="Date", row=2, col=1)
                 fig.update_yaxes(title_text="Price (₹)", row=1, col=1)
@@ -765,7 +780,9 @@ def main():
                     'Actual Investment (₹)': [int((w * investment_amount) / portfolio_data[t]['current_price']) * 
                                              portfolio_data[t]['current_price'] 
                                              for w, t in zip(result['weights'], result['tickers'])],
-                    'Sentiment': [portfolio_data[t]['mean_sentiment'] for t in result['tickers']]
+                    # Hide zero sentiment in investment table too
+                    'Sentiment': [portfolio_data[t]['mean_sentiment'] if portfolio_data[t]['mean_sentiment'] != 0 else np.nan
+                                  for t in result['tickers']]
                 })
                 
                 # Filter and sort
@@ -817,36 +834,40 @@ def main():
             st.subheader("📊 Sentiment Distribution")
             
             sentiment_values = [portfolio_data[t]['mean_sentiment'] for t in portfolio_data.keys()]
+            nonzero_sentiments = [s for s in sentiment_values if s != 0]
             
             col1, col2, col3 = st.columns(3)
             with col1:
-                positive = sum(1 for s in sentiment_values if s > 0.1)
-                st.metric("Positive Sentiment", f"{positive} stocks", 
-                         delta=f"{positive/len(sentiment_values)*100:.1f}%")
+                positive = sum(1 for s in nonzero_sentiments if s > 0.1)
+                st.metric("Positive Sentiment", f"{positive} stocks",
+                         delta=f"{(positive / max(1, len(nonzero_sentiments))) * 100:.1f}%")
             with col2:
-                neutral = sum(1 for s in sentiment_values if -0.1 <= s <= 0.1)
+                neutral = sum(1 for s in nonzero_sentiments if -0.1 <= s <= 0.1)
                 st.metric("Neutral Sentiment", f"{neutral} stocks",
-                         delta=f"{neutral/len(sentiment_values)*100:.1f}%")
+                         delta=f"{(neutral / max(1, len(nonzero_sentiments))) * 100:.1f}%")
             with col3:
-                negative = sum(1 for s in sentiment_values if s < -0.1)
+                negative = sum(1 for s in nonzero_sentiments if s < -0.1)
                 st.metric("Negative Sentiment", f"{negative} stocks",
-                         delta=f"{negative/len(sentiment_values)*100:.1f}%")
+                         delta=f"{(negative / max(1, len(nonzero_sentiments))) * 100:.1f}%")
             
-            # Sentiment histogram
-            fig_hist = go.Figure()
-            fig_hist.add_trace(go.Histogram(
-                x=sentiment_values,
-                nbinsx=30,
-                marker_color='lightblue',
-                name='Sentiment Distribution'
-            ))
-            fig_hist.update_layout(
-                title='Market Sentiment Distribution',
-                xaxis_title='Sentiment Score',
-                yaxis_title='Number of Stocks',
-                showlegend=False
-            )
-            st.plotly_chart(fig_hist, use_container_width=True)
+            # Sentiment histogram: show only if there is non-zero sentiment
+            if nonzero_sentiments:
+                fig_hist = go.Figure()
+                fig_hist.add_trace(go.Histogram(
+                    x=nonzero_sentiments,
+                    nbinsx=30,
+                    marker_color='lightblue',
+                    name='Sentiment Distribution'
+                ))
+                fig_hist.update_layout(
+                    title='Market Sentiment Distribution',
+                    xaxis_title='Sentiment Score',
+                    yaxis_title='Number of Stocks',
+                    showlegend=False
+                )
+                st.plotly_chart(fig_hist, use_container_width=True)
+            else:
+                st.info("No sentiment data available to display.")
         
         st.markdown("---")
         
@@ -858,24 +879,32 @@ def main():
             'Current Price': [portfolio_data[t]['current_price'] for t in portfolio_data.keys()],
             'Expected Return (%)': [portfolio_data[t]['expected_return'] * 100 for t in portfolio_data.keys()],
             'Risk (%)': [portfolio_data[t]['volatility'] * 100 for t in portfolio_data.keys()],
-            'Sentiment': [portfolio_data[t]['mean_sentiment'] for t in portfolio_data.keys()],
+            # Hide zeros
+            'Sentiment': [portfolio_data[t]['mean_sentiment'] if portfolio_data[t]['mean_sentiment'] != 0 else np.nan
+                          for t in portfolio_data.keys()],
             'Predicted Price': [portfolio_data[t]['predicted_price'] for t in portfolio_data.keys()]
         }).sort_values('Expected Return (%)', ascending=False)
         
         # Add Sharpe Ratio calculation
         stocks_df['Sharpe Ratio'] = (stocks_df['Expected Return (%)'] - risk_free_rate * 100) / stocks_df['Risk (%)']
         
+        # Build styler and apply sentiment gradient only when sentiment exists
+        styled = stocks_df.style.format({
+            'Current Price': '₹{:.2f}',
+            'Expected Return (%)': '{:.2f}%',
+            'Risk (%)': '{:.2f}%',
+            'Sentiment': '{:.3f}',
+            'Predicted Price': '₹{:.2f}',
+            'Sharpe Ratio': '{:.2f}'
+        }).background_gradient(subset=['Expected Return (%)'], cmap='RdYlGn')
+        
+        if stocks_df['Sentiment'].notna().any():
+            styled = styled.background_gradient(subset=['Sentiment'], cmap='RdYlGn')
+        
+        styled = styled.background_gradient(subset=['Sharpe Ratio'], cmap='RdYlGn')
+        
         st.dataframe(
-            stocks_df.style.format({
-                'Current Price': '₹{:.2f}',
-                'Expected Return (%)': '{:.2f}%',
-                'Risk (%)': '{:.2f}%',
-                'Sentiment': '{:.3f}',
-                'Predicted Price': '₹{:.2f}',
-                'Sharpe Ratio': '{:.2f}'
-            }).background_gradient(subset=['Expected Return (%)'], cmap='RdYlGn')
-            .background_gradient(subset=['Sentiment'], cmap='RdYlGn')
-            .background_gradient(subset=['Sharpe Ratio'], cmap='RdYlGn'),
+            styled,
             use_container_width=True,
             height=400
         )
