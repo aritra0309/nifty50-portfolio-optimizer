@@ -24,13 +24,14 @@ AI-powered Decision Support System (DSS) for constructing optimized Nifty 50 por
 Simple diagram (paste into mermaid.live to render)
 ```mermaid
 flowchart TD
-  Data[Price & News Data (yfinance)]
-  ETL[ETL / Preprocessing]
-  Sentiment[Sentiment (FinBERT ⇄ Momentum)]
-  LSTM[LSTM Trainer & Predictor]
-  Risk[Covariance Matrix]
-  Optim[Optimizer (Sharpe Max)]
-  UI[Streamlit Dashboard]
+  Data["Price & News Data (yfinance)"]
+  ETL["ETL / Preprocessing"]
+  Sentiment["Sentiment (FinBERT ⇄ Momentum)"]
+  LSTM["LSTM Trainer & Predictor"]
+  Risk["Covariance Matrix Calculation"]
+  Optim["Optimizer (Sharpe Max)"]
+  UI["Streamlit Dashboard"]
+  
   Data --> ETL --> Sentiment --> LSTM --> Risk --> Optim --> UI
   UI -->|user control| ETL
 ```
