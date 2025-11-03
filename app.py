@@ -45,40 +45,45 @@ def load_data():
 def calculate_momentum_sentiment(df, window=20):
     """
     Calculate sentiment proxy based on price momentum and technical indicators
-    Returns a sentiment score between -1 and 1
+    Returns a sentiment pd.Series between -1 and 1 aligned with df.index
     """
     try:
-        # 1. Price momentum (20-day return)
-        price_momentum = df['Close'].pct_change(window).fillna(0)
-        
-        # 2. Relative Strength Index (RSI)
+        # Price momentum (window-day return)
+        price_momentum = df['Close'].pct_change(window)
+
+        # Normalize momentum by recent volatility to avoid tiny absolute values
+        mom_std = price_momentum.abs().rolling(window=window).std().replace(0, 1e-10)
+        price_mom_norm = (price_momentum / mom_std).fillna(0)
+
+        # RSI
         delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / (loss + 1e-10)  # Avoid division by zero
+        gain = delta.clip(lower=0).rolling(window=14).mean()
+        loss = -delta.clip(upper=0).rolling(window=14).mean()
+        rs = gain / (loss + 1e-10)
         rsi = 100 - (100 / (1 + rs))
-        rsi_normalized = (rsi - 50) / 50  # Convert to -1 to 1
-        
-        # 3. Moving Average Crossover Signal
+        rsi_normalized = ((rsi - 50) / 50).fillna(0)
+
+        # Moving average crossover signal (1 or -1)
         ma_short = df['Close'].rolling(window=10).mean()
         ma_long = df['Close'].rolling(window=30).mean()
-        ma_signal = np.where(ma_short > ma_long, 1, -1)
-        
-        # 4. Volume-weighted momentum
-        volume_ratio = df['Volume'] / (df['Volume'].rolling(window=20).mean() + 1e-10)
+        ma_signal = ((ma_short > ma_long).astype(int) * 2 - 1).fillna(0)
+
+        # Volume-weighted momentum (normalize similarly)
+        vol_mean = df['Volume'].rolling(window=20).mean().replace(0, 1e-10)
+        volume_ratio = (df['Volume'] / vol_mean).fillna(0)
         volume_momentum = price_momentum * volume_ratio
-        
-        # Combine signals with weights
-        sentiment = (
-            0.3 * np.tanh(price_momentum * 10) +  # Normalize momentum
+        volmom_std = volume_momentum.abs().rolling(window=window).std().replace(0, 1e-10)
+        volume_mom_norm = (volume_momentum / volmom_std).fillna(0)
+
+        # Combine signals with weights and non-linear squashing
+        sentiment_raw = (
+            0.3 * np.tanh(price_mom_norm * 3) +
             0.2 * rsi_normalized +
             0.2 * ma_signal +
-            0.3 * np.tanh(volume_momentum * 5)
+            0.3 * np.tanh(volume_mom_norm * 3)
         )
-        
-        # Clip to [-1, 1] range
-        sentiment = np.clip(sentiment, -1, 1)
-        
+
+        sentiment = pd.Series(np.clip(sentiment_raw, -1, 1), index=df.index).fillna(0)
         return sentiment
     except Exception as e:
         print(f"Error calculating momentum sentiment: {e}")
