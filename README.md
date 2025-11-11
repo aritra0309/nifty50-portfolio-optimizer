@@ -100,7 +100,7 @@ flowchart TD
 
 ## License & authors
 Authors: Aritra Sarkar, Satish Prem Anand, Dhiranjit Daimary  
-License: MIT (add LICENSE file if desired)
+License: MIT
 
 ---
 
