@@ -42,7 +42,7 @@ flowchart TD
 
 1. Clone repository
    ```bash
-   git clone https://github.com/your-org/nifty50-portfolio-optimizer.git
+   git clone https://github.com/aritra0309/nifty50-portfolio-optimizer.git
    cd nifty50-portfolio-optimizer
    ```
 
